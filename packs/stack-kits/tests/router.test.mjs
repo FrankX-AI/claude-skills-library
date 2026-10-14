@@ -417,3 +417,16 @@ test('install.sh upgrades an older relative router command in place, never addin
     .hooks.UserPromptSubmit.flatMap((e) => e.hooks.map((h) => h.command));
   assert.deepEqual(cmds, ['node "${CLAUDE_PROJECT_DIR}/.claude/hooks/skill-activation-prompt.mjs"', 'bash existing.sh']);
 });
+
+test('a checkout without routing rules routes nothing, rather than borrowing the main checkout\'s', () => {
+  const rule = JSON.stringify({ skills: { 'main-only': { priority: 'high', promptTriggers: { keywords: ['hero'] } } } });
+  const main = repo(['main-only'], [], { '.claude/skills/stack-kits.rules.json': rule });
+  const tree = repo([], [], { '.git': 'gitdir: /elsewhere/.git/worktrees/old\n', 'app/page.tsx': '' });
+  assert.equal(projectDir({ cwd: join(tree, 'app') }, { CLAUDE_PROJECT_DIR: main }), tree);
+  const r = spawnSync('node', [HOOK], {
+    input: JSON.stringify({ prompt: 'restyle the hero', cwd: join(tree, 'app') }),
+    env: { ...process.env, CLAUDE_PROJECT_DIR: main },
+    encoding: 'utf8',
+  });
+  assert.equal(r.stdout.trim(), '', 'no rules in this checkout means no routing');
+});

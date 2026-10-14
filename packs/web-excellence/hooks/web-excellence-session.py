@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 PACK_SKILLS = [
     "web-release-gate",
@@ -103,6 +104,9 @@ def record_baseline(session_id: str, cwd: str) -> None:
     baselines = state.setdefault("baseline", {})
     if root in baselines:
         return
+    # When this session began: the Stop hook counts receipts for shell-only
+    # changes from this point.
+    state.setdefault("started", time.time())
     out = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if out is None:
         return
@@ -112,16 +116,20 @@ def record_baseline(session_id: str, cwd: str) -> None:
         i += 1
         if len(entry) < 4:
             continue
-        rel = entry[3:]
-        if entry[0] in "RC":
+        rels = [entry[3:]]
+        if entry[0] in "RC" and i < len(parts) and parts[i]:
+            rels.append(parts[i])  # the source of a rename or copy
             i += 1
-        try:
-            st = os.stat(os.path.join(root, rel))
-            dirty[rel] = [st.st_mtime_ns, st.st_size]
-        except OSError:
-            dirty[rel] = None
-    head = (git(root, "rev-parse", "HEAD") or "").strip()
-    baselines[root] = {"dirty": dirty, "head": head}
+        for rel in rels:
+            try:
+                st = os.stat(os.path.join(root, rel))
+                dirty[rel] = [st.st_mtime_ns, st.st_size]
+            except OSError:
+                dirty[rel] = None
+    # Where HEAD's reflog stands: the Stop hook counts commits made here from
+    # this entry on, by position, since the reflog only keeps whole seconds.
+    reflog = len((git(root, "log", "-g", "--format=%H", "HEAD") or "").splitlines())
+    baselines[root] = {"dirty": dirty, "reflog": reflog}
     try:
         fd = os.open(sp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as fh:
@@ -135,9 +143,14 @@ def main() -> int:
         payload = json.load(sys.stdin)
     except Exception:
         payload = {}
+    # A session can start or resume below the repo root (cwd = <repo>/app);
+    # the pack, the contracts and the baseline all live at the root. The
+    # checkout the session is in wins over CLAUDE_PROJECT_DIR: in a worktree
+    # that names the main checkout, and the stop hook keys baselines by the
+    # checkout it runs in.
     cwd = payload.get("cwd") or os.getcwd()
-
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR") or (git(cwd, "rev-parse", "--show-toplevel") or "").strip() or cwd
+    project_dir = ((git(cwd, "rev-parse", "--show-toplevel") or "").strip()
+                   or os.environ.get("CLAUDE_PROJECT_DIR") or cwd)
     skills_dir = os.path.join(project_dir, ".claude", "skills")
     present = [s for s in PACK_SKILLS if os.path.isdir(os.path.join(skills_dir, s))]
     if not present:
